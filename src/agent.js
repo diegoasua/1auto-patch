@@ -28,6 +28,7 @@ export async function repairPassword(item, adapter) {
       log("Vault item updated after sandbox confirmation");
       return { ok: true, item: redact(updated), events, runtime: "daytona-browser", adapter: adapter.id };
     } catch (error) {
+      for (const event of error.events ?? []) events.push(event);
       await markRecoveryRecord(recovery.id, "failed", { error: error.message });
       log(`Daytona repair failed: ${error.message}`);
       return { ok: false, error: error.message, events, runtime: "daytona-browser", adapter: adapter.id };

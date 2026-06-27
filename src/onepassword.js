@@ -9,7 +9,7 @@ export async function onePasswordStatus() {
     return {
       configured: false,
       available: false,
-      mode: "local demo vault",
+      mode: "1Password CLI unavailable",
       message: "1Password CLI `op` is not installed or not on PATH.",
     };
   }
@@ -29,7 +29,7 @@ export async function onePasswordStatus() {
     return {
       configured: false,
       available: true,
-      mode: "local demo vault",
+      mode: "1Password CLI signed out",
       vault: process.env.OP_VAULT ?? null,
       message: cleanError(error),
     };

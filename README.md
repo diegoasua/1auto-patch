@@ -90,6 +90,6 @@ For real sites, the scanner uses an adapter registry:
 - `app.agihouse.org`: classified as passwordless because the public sign-in flow exposes magic link and Google sign-in, but no password field.
 - Other sites: generic browser repair is disabled by default. Enable it with `ENABLE_GENERIC_REPAIR=true` only for throwaway accounts.
 
-For better real-site results, add a custom 1Password field named `change password url` or add a second URL whose label or value includes `password`, `change`, or `security`.
+For real sites, the agent first tries standards-based discovery with `/.well-known/change-password`, then known provider hints, then same-site crawling for account, settings, security, credential, and password pages. A custom 1Password field named `change password url` is supported as an optional debugging hint, but the demo does not rely on it.
 
 The Daytona browser path starts computer-use services, launches Chromium inside the sandbox, performs the repair, verifies where possible, then updates 1Password. A local ignored `repair-recovery.local.json` ledger is written before site mutation so the generated password is not lost if the vault update fails.

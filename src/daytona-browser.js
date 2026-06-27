@@ -1,4 +1,3 @@
-import { CodeLanguage } from "@daytona/sdk";
 import { createSandbox, stopSandbox } from "./daytona.js";
 
 export async function probeDaytonaBrowser() {
@@ -42,7 +41,7 @@ export async function repairWithDaytonaBrowser(item, newPassword, adapter) {
     await sandbox.computerUse.start();
     const response = await sandbox.process.codeRun(browserRepairProgram(), undefined, 120);
     const parsed = parseJsonLine(response.result);
-    if (!parsed.ok) throw new Error(parsed.error ?? "Daytona browser repair failed");
+    if (!parsed.ok) throw new DaytonaRepairError(parsed);
     return parsed;
   } finally {
     try {
@@ -51,6 +50,16 @@ export async function repairWithDaytonaBrowser(item, newPassword, adapter) {
       // Ephemeral cleanup best effort.
     }
     await stopSandbox(sandbox);
+  }
+}
+
+class DaytonaRepairError extends Error {
+  constructor(result) {
+    super(result.error ?? "Daytona browser repair failed");
+    this.name = "DaytonaRepairError";
+    this.events = result.events ?? [];
+    this.result = result;
+    this.raw = result.raw;
   }
 }
 
@@ -82,7 +91,11 @@ function parseJsonLine(output) {
     .split("\n")
     .findLast((candidate) => candidate.trim().startsWith("{"));
   if (!line) return { ok: false, raw: output, error: "No JSON result from Daytona browser runner" };
-  return JSON.parse(line);
+  try {
+    return JSON.parse(line);
+  } catch (error) {
+    return { ok: false, raw: output, error: "Could not parse Daytona browser runner JSON: " + error.message };
+  }
 }
 
 function browserRepairProgram() {
@@ -90,15 +103,24 @@ function browserRepairProgram() {
     import { spawn } from "node:child_process";
 
     const events = [];
-    const log = (message) => events.push({ at: new Date().toISOString(), message });
+    let currentPhase = "boot";
+    const log = (message) => {
+      currentPhase = message;
+      events.push({ at: new Date().toISOString(), message });
+    };
 
     class Cdp {
       constructor(ws) {
         this.ws = ws;
         this.id = 0;
         this.pending = new Map();
+        this.pageExceptions = [];
         ws.onmessage = (event) => {
           const message = JSON.parse(event.data);
+          if (message.method === "Runtime.exceptionThrown") {
+            this.pageExceptions.push(formatExceptionDetails(message.params.exceptionDetails));
+            this.pageExceptions = this.pageExceptions.slice(-5);
+          }
           if (message.id && this.pending.has(message.id)) {
             const { resolve, reject } = this.pending.get(message.id);
             this.pending.delete(message.id);
@@ -115,24 +137,70 @@ function browserRepairProgram() {
           setTimeout(() => {
             if (this.pending.has(id)) {
               this.pending.delete(id);
-              reject(new Error("CDP timeout: " + method));
+              reject(new Error("CDP timeout during " + currentPhase + ": " + method));
             }
           }, 20000);
         });
       }
 
       async eval(fn, ...args) {
-        const expression = "(" + fn.toString() + ")(..." + JSON.stringify(args) + ")";
+        const expression =
+          "(() => {\n" +
+          pageHelperSource() +
+          "\nreturn (" + fn.toString() + ")(..." + JSON.stringify(args) + ");\n" +
+          "})()";
         const result = await this.send("Runtime.evaluate", {
           expression,
           awaitPromise: true,
           returnByValue: true,
         });
         if (result.exceptionDetails) {
-          throw new Error(result.exceptionDetails.text || "Browser evaluation failed");
+          throw new Error("Browser eval failed in " + functionLabel(fn) + " during " + currentPhase + ": " + formatExceptionDetails(result.exceptionDetails));
         }
         return result.result.value;
       }
+
+      async evalRaw(expression) {
+        const result = await this.send("Runtime.evaluate", {
+          expression,
+          awaitPromise: true,
+          returnByValue: true,
+        });
+        if (result.exceptionDetails) {
+          throw new Error(formatExceptionDetails(result.exceptionDetails));
+        }
+        return result.result.value;
+      }
+    }
+
+    function functionLabel(fn) {
+      return fn.name || "anonymous browser function";
+    }
+
+    function formatExceptionDetails(details = {}) {
+      const exception = details.exception ?? {};
+      const description = exception.description || exception.value || details.text || "Browser evaluation failed";
+      const frame = details.stackTrace?.callFrames?.[0];
+      const location = frame
+        ? " at " + (frame.functionName || "anonymous") + ":" + (frame.lineNumber + 1) + ":" + (frame.columnNumber + 1)
+        : details.lineNumber != null
+          ? " at eval:" + (details.lineNumber + 1) + ":" + ((details.columnNumber ?? 0) + 1)
+          : "";
+      return String(description).split("\n").slice(0, 4).join(" | ") + location;
+    }
+
+    function pageHelperSource() {
+      return [
+        sleep,
+        firstMatch,
+        findUsernameInput,
+        fieldText,
+        setInputValue,
+        submitNearby,
+        findSubmitControl,
+        isPasswordlessButton,
+        buttonText,
+      ].map((fn) => fn.toString()).join("\n");
     }
 
     async function main() {
@@ -152,6 +220,8 @@ function browserRepairProgram() {
         const cdp = await connectCdp();
         await cdp.send("Page.enable");
         await cdp.send("Runtime.enable");
+        await cdp.send("Network.enable");
+        log("Connected to Daytona Chromium");
 
         if (adapter === "agihouse-passwordless") {
           await inspectPasswordless(cdp);
@@ -193,11 +263,13 @@ function browserRepairProgram() {
     async function repairDemo(cdp) {
       log("Opening target login page in Daytona Chromium");
       await navigate(cdp, process.env.TARGET_WEBSITE);
+      await logPageState(cdp, "Loaded demo login page");
       await cdp.eval(fillDemoLogin, process.env.ITEM_USERNAME, process.env.ITEM_PASSWORD);
       await waitForUrl(cdp, "/target/settings", 15000);
 
       log("Authenticated; opening password settings");
       await navigate(cdp, process.env.TARGET_CHANGE_PASSWORD_URL);
+      await logPageState(cdp, "Loaded demo password settings");
       await cdp.eval(fillDemoPasswordChange, process.env.ITEM_PASSWORD, process.env.NEW_PASSWORD);
       await waitForText(cdp, "Password changed", 15000);
 
@@ -211,41 +283,87 @@ function browserRepairProgram() {
     async function repairGeneric(cdp) {
       log("Opening login page in Daytona Chromium");
       await navigate(cdp, process.env.TARGET_WEBSITE);
+      await logPageState(cdp, "Loaded login page");
       const login = await cdp.eval(loginWithHeuristics, process.env.ITEM_USERNAME, process.env.ITEM_PASSWORD);
+      log("Submitted login form");
       if (login.passwordless) throw new Error("No password field found. Site may be passwordless.");
       if (!login.submitted) throw new Error("Could not submit login form.");
       await sleep(3000);
+      await logPageState(cdp, "State after login submit");
+      const loginState = await cdp.eval(classifyAuthState, process.env.TARGET_WEBSITE);
+      if (loginState.failed) throw new Error("Login failed before password repair: " + loginState.reason);
 
       log("Looking for password-change page");
-      const candidates = candidatePasswordUrls(process.env.TARGET_WEBSITE, process.env.TARGET_CHANGE_PASSWORD_URL);
-      let found = false;
-      for (const url of candidates) {
-        await navigate(cdp, url).catch(() => {});
-        await sleep(1500);
-        const hasForm = await cdp.eval(hasPasswordChangeForm);
-        if (hasForm) {
-          found = true;
-          break;
-        }
-      }
-      if (!found) throw new Error("Could not find a password-change form.");
+      const found = await discoverPasswordChangePage(cdp, process.env.TARGET_WEBSITE, process.env.TARGET_CHANGE_PASSWORD_URL);
+      if (!found) throw new Error("Could not discover a password-change form.");
 
       log("Filling password-change form");
+      await logPageState(cdp, "Ready to submit password-change form");
       const changed = await cdp.eval(fillGenericPasswordChange, process.env.ITEM_PASSWORD, process.env.NEW_PASSWORD);
       if (!changed.submitted) throw new Error(changed.reason || "Could not submit password-change form.");
       await sleep(4000);
+      await logPageState(cdp, "State after password-change submit");
 
-      const pageText = await cdp.eval(() => document.body.innerText.toLowerCase());
-      if (pageText.includes("incorrect") || pageText.includes("invalid") || pageText.includes("failed")) {
-        throw new Error("Password-change page reported a failure.");
+      const changeState = await cdp.eval(classifyPasswordChangeState);
+      if (changeState.failed) throw new Error("Password-change page reported a failure: " + changeState.reason);
+      if (changeState.succeeded) {
+        log("Website reported password-change success");
+      } else {
+        log("Password-change success was ambiguous; verifying new password before vault update");
       }
-      log("Site did not report an immediate password-change failure");
+
+      log("Verifying new password in a fresh browser session");
+      await clearBrowserState(cdp);
+      await navigate(cdp, process.env.TARGET_WEBSITE);
+      await logPageState(cdp, "Loaded fresh login page for verification");
+      const verify = await cdp.eval(loginWithHeuristics, process.env.ITEM_USERNAME, process.env.NEW_PASSWORD);
+      log("Submitted verification login form");
+      if (verify.passwordless) throw new Error("Verification login found no password field.");
+      if (!verify.submitted) throw new Error("Could not submit verification login.");
+      await sleep(4000);
+      await logPageState(cdp, "State after verification submit");
+      const verifyState = await cdp.eval(classifyAuthState, process.env.TARGET_WEBSITE);
+      if (verifyState.failed) throw new Error("New password verification failed: " + verifyState.reason);
+      if (!verifyState.succeeded) throw new Error("New password verification was inconclusive; refusing to update the vault.");
+      log("Verified login with new password");
+    }
+
+    async function discoverPasswordChangePage(cdp, loginUrl, explicitUrl) {
+      const visited = new Set();
+      const queue = candidatePasswordUrls(loginUrl, explicitUrl);
+      const initialLinks = await cdp.eval(extractPasswordCandidateLinks, loginUrl);
+      for (const link of initialLinks) queue.push(link.url);
+      log("Discovered " + initialLinks.length + " candidate link(s) after login");
+
+      for (let attempts = 0; queue.length > 0 && attempts < 18; attempts++) {
+        const url = queue.shift();
+        if (!url || visited.has(url)) continue;
+        visited.add(url);
+        log("Checking candidate password page: " + url);
+        await navigate(cdp, url).catch((error) => log("Navigation failed: " + error.message));
+        await sleep(1500);
+        await logPageState(cdp, "Candidate page loaded");
+
+        const hasForm = await cdp.eval(hasPasswordChangeForm);
+        if (hasForm) {
+          log("Found password-change form at " + (await cdp.eval(() => location.href)));
+          return true;
+        }
+
+        const links = await cdp.eval(extractPasswordCandidateLinks, loginUrl);
+        for (const link of links) {
+          if (!visited.has(link.url) && !queue.includes(link.url)) queue.push(link.url);
+        }
+      }
+      return false;
     }
 
     function candidatePasswordUrls(loginUrl, explicitUrl) {
       const origin = new URL(loginUrl).origin;
-      return [
-        explicitUrl,
+      const explicit = explicitUrl && explicitUrl !== loginUrl ? [explicitUrl] : [];
+      return [...new Set([
+        ...explicit,
+        ...knownProviderPasswordUrls(loginUrl),
         origin + "/.well-known/change-password",
         origin + "/settings/security",
         origin + "/settings/password",
@@ -253,7 +371,69 @@ function browserRepairProgram() {
         origin + "/account/password",
         origin + "/profile/security",
         origin + "/profile/password",
-      ].filter(Boolean);
+        origin + "/user/settings",
+        origin + "/preferences",
+        origin + "/my/preferences/account",
+        origin + "/auth/edit",
+      ].filter(Boolean))];
+    }
+
+    function knownProviderPasswordUrls(loginUrl) {
+      const url = new URL(loginUrl);
+      const host = url.hostname.replace(/^www\./, "");
+      if (host === "auth.wikimedia.org" || host.endsWith(".wikipedia.org") || host.endsWith(".wikimedia.org")) {
+        return [
+          "https://auth.wikimedia.org/enwiki/wiki/Special:ChangePassword",
+          "https://auth.wikimedia.org/enwiki/wiki/Special:ChangeCredentials/MediaWiki%5CAuth%5CPasswordAuthenticationRequest",
+        ];
+      }
+      if (host === "mastodon.social" || locationLooksLikeMastodon(loginUrl)) {
+        return [new URL("/auth/edit", loginUrl).href];
+      }
+      if (host.endsWith("discourse.org") || host.includes("forum.") || host.includes("discuss.")) {
+        return [new URL("/my/preferences/account", loginUrl).href];
+      }
+      if (host === "dev.to") {
+        return [new URL("/settings/account", loginUrl).href, new URL("/settings", loginUrl).href];
+      }
+      return [];
+    }
+
+    function locationLooksLikeMastodon(loginUrl) {
+      const path = new URL(loginUrl).pathname;
+      return path.startsWith("/auth/");
+    }
+
+    function extractPasswordCandidateLinks(loginUrl) {
+      const login = new URL(loginUrl);
+      const sameSite = (candidate) => {
+        if (candidate.origin === login.origin) return true;
+        const loginParts = login.hostname.split(".").slice(-2).join(".");
+        const candidateParts = candidate.hostname.split(".").slice(-2).join(".");
+        return loginParts === candidateParts;
+      };
+      const scored = [...document.querySelectorAll("a[href]")]
+        .map((link) => {
+          try {
+            const url = new URL(link.href, location.href);
+            const haystack = [link.innerText, link.textContent, link.title, link.ariaLabel, link.href].filter(Boolean).join(" ").toLowerCase();
+            if (!["http:", "https:"].includes(url.protocol)) return null;
+            if (!sameSite(url)) return null;
+            if (/logout|sign.?out|delete|remove|privacy|terms|billing|invoice|subscribe/.test(haystack)) return null;
+            let score = 0;
+            if (/change.{0,20}password|password.{0,20}change|password/.test(haystack)) score += 100;
+            if (/security|credential|account|settings|profile|preferences/.test(haystack)) score += 35;
+            if (/settings|account|profile|preferences|security|password|credential/.test(url.pathname.toLowerCase())) score += 25;
+            if (/help|support|docs|blog|event|post|search|notification|message/.test(haystack)) score -= 40;
+            return score > 0 ? { url: url.href, score } : null;
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.score - a.score);
+
+      return [...new Map(scored.map((item) => [item.url, item])).values()].slice(0, 12);
     }
 
     async function inspectPasswordless(cdp) {
@@ -272,7 +452,54 @@ function browserRepairProgram() {
 
     async function navigate(cdp, url) {
       await cdp.send("Page.navigate", { url });
+      await sleep(700);
       await waitForReady(cdp);
+    }
+
+    async function logPageState(cdp, label) {
+      const state = await pageState(cdp);
+      if (state.error) {
+        log(label + ": page state unavailable: " + state.error);
+        return;
+      }
+      const fields = [
+        state.passwordInputs + " password field(s)",
+        state.inputs + " input(s)",
+        state.buttons + " button(s)",
+      ].join(", ");
+      log(label + ": " + (state.title || "untitled") + " @ " + state.href + " [" + fields + "]");
+      if (state.recentException) log("Recent page exception: " + state.recentException);
+    }
+
+    async function pageState(cdp) {
+      try {
+        const state = await cdp.evalRaw(
+          "(() => {" +
+            "const visible = (el) => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);" +
+            "return {" +
+              "href: location.href," +
+              "title: document.title," +
+              "readyState: document.readyState," +
+              "inputs: [...document.querySelectorAll('input')].filter(visible).length," +
+              "passwordInputs: [...document.querySelectorAll('input[type=\"password\"]')].filter(visible).length," +
+              "buttons: [...document.querySelectorAll('button,input[type=submit]')].filter(visible).length" +
+            "};" +
+          "})()",
+        );
+        return { ...state, recentException: cdp.pageExceptions.at(-1) };
+      } catch (error) {
+        return { error: error.message };
+      }
+    }
+
+    async function clearBrowserState(cdp) {
+      await cdp.send("Network.clearBrowserCookies").catch(() => {});
+      await cdp.send("Network.clearBrowserCache").catch(() => {});
+      const origin = new URL(process.env.TARGET_WEBSITE).origin;
+      await cdp.send("Storage.clearDataForOrigin", {
+        origin,
+        storageTypes: "appcache,cookies,file_systems,indexeddb,local_storage,shader_cache,websql,service_workers,cache_storage",
+      }).catch(() => {});
     }
 
     async function waitForReady(cdp) {
@@ -319,18 +546,30 @@ function browserRepairProgram() {
       document.querySelector('button[type="submit"]').click();
     }
 
-    function loginWithHeuristics(username, password) {
+    async function loginWithHeuristics(username, password) {
       const visible = (el) => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
       const inputs = [...document.querySelectorAll("input")].filter(visible);
-      const passwordInput = inputs.find((input) => input.type === "password");
+      let passwordInput = inputs.find((input) => input.type === "password");
+      if (!passwordInput) {
+        const userOnly = findUsernameInput(inputs);
+        if (userOnly) {
+          const submit = findSubmitControl(userOnly, { login: true, allowContinue: true });
+          if (submit && !isPasswordlessButton(submit)) {
+            setInputValue(userOnly, username);
+            submit.click();
+            await sleep(2000);
+            passwordInput = [...document.querySelectorAll("input")].filter(visible).find((input) => input.type === "password");
+          }
+        }
+      }
       if (!passwordInput) return { submitted: false, passwordless: true };
+      const refreshedInputs = [...document.querySelectorAll("input")].filter(visible);
       const userInput =
-        inputs.find((input) => ["email", "text"].includes(input.type) && /email|user|login/i.test([input.name, input.id, input.placeholder, input.autocomplete].join(" "))) ||
-        inputs.find((input) => input.type === "email" || input.autocomplete === "username") ||
-        inputs.find((input) => input !== passwordInput && ["text", "email"].includes(input.type));
+        findUsernameInput(refreshedInputs) ||
+        refreshedInputs.find((input) => input !== passwordInput && ["text", "email"].includes(input.type));
       if (userInput) setInputValue(userInput, username);
       setInputValue(passwordInput, password);
-      return submitNearby(passwordInput);
+      return submitNearby(passwordInput, { login: true });
     }
 
     function hasPasswordChangeForm() {
@@ -350,7 +589,76 @@ function browserRepairProgram() {
       setInputValue(current, currentPassword);
       setInputValue(next, newPassword);
       setInputValue(confirm, newPassword);
-      return submitNearby(next);
+      return submitNearby(next, { passwordChange: true });
+    }
+
+    function classifyAuthState(targetWebsite) {
+      const text = document.body.innerText.toLowerCase();
+      const href = location.href.toLowerCase();
+      const visiblePasswordInputs = [...document.querySelectorAll('input[type="password"]')].filter((input) => input.offsetParent !== null).length;
+      const failure = firstMatch(text, [
+        "invalid e-mail address or password",
+        "invalid email address or password",
+        "incorrect password",
+        "invalid password",
+        "wrong password",
+        "invalid username",
+        "invalid login",
+        "login failed",
+        "sign in failed",
+        "authentication failed",
+        "couldn't log you in",
+      ]);
+      if (failure) return { failed: true, succeeded: false, reason: failure, href, visiblePasswordInputs };
+      const success = firstMatch(text, ["log out", "logout", "sign out", "account settings", "profile", "preferences", "compose", "home"]);
+      const loginishUrl = /login|signin|sign_in|session|auth/.test(href);
+      const noPasswordForm = visiblePasswordInputs === 0;
+      const changedAway = !loginishUrl && href !== String(targetWebsite ?? "").toLowerCase();
+      return {
+        failed: false,
+        succeeded: Boolean(success || changedAway || (noPasswordForm && !loginishUrl)),
+        reason: success || (changedAway ? "navigated away from login" : noPasswordForm ? "password form disappeared" : ""),
+        href,
+        visiblePasswordInputs,
+      };
+    }
+
+    function classifyPasswordChangeState() {
+      const text = document.body.innerText.toLowerCase();
+      const failure = firstMatch(text, [
+        "incorrect current password",
+        "current password is incorrect",
+        "old password is incorrect",
+        "invalid password",
+        "passwords do not match",
+        "password doesn't meet",
+        "password does not meet",
+        "failed",
+        "error",
+      ]);
+      if (failure) return { failed: true, succeeded: false, reason: failure };
+      const success = firstMatch(text, [
+        "password changed",
+        "password has been changed",
+        "password updated",
+        "password has been updated",
+        "changes saved",
+        "saved successfully",
+        "successfully changed",
+        "successfully updated",
+      ]);
+      return { failed: false, succeeded: Boolean(success), reason: success || "" };
+    }
+
+    function firstMatch(text, phrases) {
+      return phrases.find((phrase) => text.includes(phrase)) || "";
+    }
+
+    function findUsernameInput(inputs) {
+      return (
+        inputs.find((input) => ["email", "text"].includes(input.type) && /email|user|login|account/i.test(fieldText(input))) ||
+        inputs.find((input) => input.type === "email" || input.autocomplete === "username")
+      );
     }
 
     function fieldText(input) {
@@ -360,24 +668,49 @@ function browserRepairProgram() {
 
     function setInputValue(input, value) {
       input.focus();
-      input.value = value;
+      const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value");
+      descriptor?.set ? descriptor.set.call(input, value) : (input.value = value);
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
     }
 
-    function submitNearby(input) {
+    function submitNearby(input, intent = {}) {
       const form = input.closest("form");
       if (form) {
-        form.requestSubmit ? form.requestSubmit() : form.submit();
+        const formSubmit = findSubmitControl(input, intent, form);
+        if (formSubmit) formSubmit.click();
+        else form.requestSubmit ? form.requestSubmit() : form.submit();
         return { submitted: true };
       }
-      const buttons = [...document.querySelectorAll("button,input[type=submit]")].filter((button) => !button.disabled);
-      const submit = buttons.find((button) => /save|change|update|submit|sign in|log in|continue/i.test(button.innerText || button.value || ""));
+      const submit = findSubmitControl(input, intent);
       if (submit) {
         submit.click();
         return { submitted: true };
       }
       return { submitted: false };
+    }
+
+    function findSubmitControl(input, intent = {}, scope = document) {
+      const buttons = [...document.querySelectorAll("button,input[type=submit]")].filter((button) => !button.disabled);
+      const scoped = scope === document ? buttons : buttons.filter((button) => scope.contains(button));
+      const candidates = scoped.length ? scoped : buttons;
+      const labels = intent.passwordChange
+        ? [/change password/i, /update password/i, /^save$/i, /save changes/i, /update/i, /change/i, /submit/i]
+        : intent.login
+          ? [/sign in/i, /log in/i, /^login$/i, /continue/i, /next/i, /submit/i]
+          : [/continue/i, /next/i, /submit/i];
+      return candidates.find((button) => {
+        const text = buttonText(button);
+        return !isPasswordlessButton(button) && labels.some((pattern) => pattern.test(text));
+      });
+    }
+
+    function isPasswordlessButton(button) {
+      return /magic link|one-time|one time|otp|verification code|passkey|webauthn|google|github|sso|single sign/i.test(buttonText(button));
+    }
+
+    function buttonText(button) {
+      return [button.innerText, button.value, button.name, button.id, button.getAttribute("aria-label")].filter(Boolean).join(" ").trim();
     }
 
     function sleep(ms) {
@@ -386,6 +719,15 @@ function browserRepairProgram() {
 
     main()
       .then((result) => console.log(JSON.stringify(result)))
-      .catch((error) => console.log(JSON.stringify({ ok: false, error: error.message, events })));
+      .catch((error) => {
+        const pageException = error?.pageExceptions?.at?.(-1);
+        console.log(JSON.stringify({
+          ok: false,
+          error: error.message || String(error),
+          phase: currentPhase,
+          pageException,
+          events,
+        }));
+      });
   `;
 }
