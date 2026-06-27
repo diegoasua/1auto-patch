@@ -173,10 +173,16 @@ h1 {
 }
 
 .row p,
+.row small,
 .score span {
   margin: 0;
   color: #646d7c;
   overflow-wrap: anywhere;
+}
+
+.row small {
+  display: block;
+  margin-top: 6px;
 }
 
 .score strong {

@@ -81,3 +81,15 @@ Set `DAYTONA_PUBLIC_BASE_URL` to the HTTPS tunnel URL, then:
 ```bash
 REPAIR_RUNTIME=daytona
 ```
+
+## Real-Site Notes
+
+For real sites, the scanner uses an adapter registry:
+
+- Controlled local demo target: repairable.
+- `app.agihouse.org`: classified as passwordless because the public sign-in flow exposes magic link and Google sign-in, but no password field.
+- Other sites: generic browser repair is disabled by default. Enable it with `ENABLE_GENERIC_REPAIR=true` only for throwaway accounts.
+
+For better real-site results, add a custom 1Password field named `change password url` or add a second URL whose label or value includes `password`, `change`, or `security`.
+
+The Daytona browser path starts computer-use services, launches Chromium inside the sandbox, performs the repair, verifies where possible, then updates 1Password. A local ignored `repair-recovery.local.json` ledger is written before site mutation so the generated password is not lost if the vault update fails.

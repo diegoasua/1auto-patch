@@ -1,24 +1,36 @@
 import { chromium } from "playwright";
-import { repairDemoInDaytona } from "./daytona.js";
+import { repairWithDaytonaBrowser } from "./daytona-browser.js";
 import { generatePassword } from "./password.js";
+import { createRecoveryRecord, markRecoveryRecord } from "./recovery.js";
 import { updatePassword } from "./vault.js";
 
-export async function repairPassword(item) {
+export async function repairPassword(item, adapter) {
   const newPassword = generatePassword();
   const events = [];
   const log = (message) => events.push({ at: new Date().toISOString(), message });
+  const recovery = await createRecoveryRecord({
+    item,
+    oldPassword: item.password,
+    newPassword,
+    runtime: process.env.REPAIR_RUNTIME ?? "local",
+    adapter: adapter.id,
+  });
 
   if (process.env.REPAIR_RUNTIME === "daytona") {
     try {
-      log("Starting Daytona sandbox repair run");
-      await repairDemoInDaytona(item, newPassword);
-      log("Daytona sandbox confirmed password change");
+      log("Starting Daytona browser repair run");
+      const result = await repairWithDaytonaBrowser(item, newPassword, adapter);
+      for (const event of result.events ?? []) events.push(event);
+      log("Daytona browser verified password change");
+      await markRecoveryRecord(recovery.id, "site_changed");
       const updated = await updatePassword(item.id, newPassword);
+      await markRecoveryRecord(recovery.id, "vault_updated");
       log("Vault item updated after sandbox confirmation");
-      return { ok: true, item: redact(updated), events, runtime: "daytona" };
+      return { ok: true, item: redact(updated), events, runtime: "daytona-browser", adapter: adapter.id };
     } catch (error) {
+      await markRecoveryRecord(recovery.id, "failed", { error: error.message });
       log(`Daytona repair failed: ${error.message}`);
-      return { ok: false, error: error.message, events, runtime: "daytona" };
+      return { ok: false, error: error.message, events, runtime: "daytona-browser", adapter: adapter.id };
     }
   }
 
@@ -42,12 +54,15 @@ export async function repairPassword(item) {
     await page.waitForSelector("[data-testid=success]");
 
     log("Website confirmed password change");
+    await markRecoveryRecord(recovery.id, "site_changed");
     const updated = await updatePassword(item.id, newPassword);
+    await markRecoveryRecord(recovery.id, "vault_updated");
     log("Vault item updated after confirmation");
-    return { ok: true, item: redact(updated), events };
+    return { ok: true, item: redact(updated), events, adapter: adapter.id };
   } catch (error) {
+    await markRecoveryRecord(recovery.id, "failed", { error: error.message });
     log(`Repair failed: ${error.message}`);
-    return { ok: false, error: error.message, events };
+    return { ok: false, error: error.message, events, adapter: adapter.id };
   } finally {
     await browser.close();
   }

@@ -82,7 +82,7 @@ export async function repairDemoInDaytona(item, newPassword) {
   }
 }
 
-async function createSandbox(envVars = {}) {
+export async function createSandbox(envVars = {}) {
   const daytona = new Daytona();
   return daytona.create({
     language: CodeLanguage.JAVASCRIPT,
@@ -96,7 +96,7 @@ async function createSandbox(envVars = {}) {
   });
 }
 
-async function stopSandbox(sandbox) {
+export async function stopSandbox(sandbox) {
   try {
     await sandbox.stop(30, true);
   } catch {

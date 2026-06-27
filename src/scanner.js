@@ -1,3 +1,4 @@
+import { resolveAdapter } from "./adapters.js";
 import { ageDays, breachCount, scorePassword } from "./password.js";
 
 export async function scanItems(items) {
@@ -11,6 +12,7 @@ export async function scanItems(items) {
     const score = scorePassword(item.password);
     const breaches = await breachCount(item.password);
     const age = ageDays(item.updatedAt);
+    const adapter = resolveAdapter(item);
     const reasons = [];
     if (score < 55) reasons.push("weak");
     if (breaches > 0) reasons.push("known breach");
@@ -25,19 +27,12 @@ export async function scanItems(items) {
       score,
       breachCount: breaches,
       ageDays: age,
-      repairable: isDemoTarget(item.website),
+      adapter,
+      repairable: adapter.repairable,
+      repairNote: adapter.note,
       risk: reasons.length ? reasons.join(", ") : "ok",
       status: reasons.length ? "risky" : "ok",
     });
   }
   return results;
-}
-
-function isDemoTarget(value) {
-  try {
-    const url = new URL(value);
-    return ["localhost", "127.0.0.1"].includes(url.hostname) && url.pathname.startsWith("/target");
-  } catch {
-    return false;
-  }
 }

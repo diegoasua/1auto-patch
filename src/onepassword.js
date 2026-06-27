@@ -57,9 +57,12 @@ export async function getOnePasswordItem(id) {
   const username = fieldValue(raw, ["username", "email"]);
   const password = passwordField(raw)?.value;
   const website = raw.urls?.[0]?.href ?? raw.url ?? "";
+  const explicitChangePasswordUrl =
+    fieldValue(raw, ["changePasswordUrl", "change password url", "password change url", "security url"]) ||
+    raw.urls?.find((url) => /change|password|security/i.test([url.label, url.href].filter(Boolean).join(" ")))?.href;
   const changePasswordUrl = website.includes("/target/login")
     ? website.replace("/target/login", "/target/settings")
-    : raw.changePasswordUrl ?? website;
+    : explicitChangePasswordUrl ?? raw.changePasswordUrl ?? website;
   return {
     id: raw.id,
     title: raw.title,

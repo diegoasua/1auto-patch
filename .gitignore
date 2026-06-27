@@ -8,6 +8,7 @@ node_modules/
 
 # Local/generated app state
 vault.local.json
+repair-recovery.local.json
 
 # Python local environment
 .venv/

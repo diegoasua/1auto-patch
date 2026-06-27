@@ -1,6 +1,7 @@
 const scanButton = document.querySelector("#scanButton");
 const resetButton = document.querySelector("#resetButton");
 const probeDaytonaButton = document.querySelector("#probeDaytonaButton");
+const probeBrowserButton = document.querySelector("#probeBrowserButton");
 const results = document.querySelector("#results");
 const riskyCount = document.querySelector("#riskyCount");
 const statusEl = document.querySelector("#status");
@@ -10,6 +11,7 @@ const integrationsEl = document.querySelector("#integrations");
 scanButton.addEventListener("click", scan);
 resetButton.addEventListener("click", resetDemo);
 probeDaytonaButton.addEventListener("click", probeDaytona);
+probeBrowserButton.addEventListener("click", probeBrowser);
 loadIntegrations();
 scan();
 
@@ -29,12 +31,13 @@ function render(items) {
     .map((item) => {
       const action = item.repairable
         ? `<button class="repair" data-id="${item.id}">Repair</button>`
-        : `<button disabled title="No adapter in demo">Needs adapter</button>`;
+        : `<button disabled title="${escapeHtml(item.repairNote)}">${item.adapter?.id === "agihouse-passwordless" ? "Passwordless" : "Needs adapter"}</button>`;
       return `
         <article class="row ${item.status}">
           <div>
             <h3>${escapeHtml(item.title)}</h3>
             <p>${escapeHtml(item.username)} · ${escapeHtml(item.website)}</p>
+            <small>${escapeHtml(item.adapter?.label ?? "Unknown")} · ${escapeHtml(item.repairNote ?? "")}</small>
           </div>
           <div class="score">
             <strong>${item.score}</strong>
@@ -103,6 +106,23 @@ async function probeDaytona() {
   eventsEl.innerHTML += `<li>Daytona sandbox responded from ${escapeHtml(result.cwd ?? "sandbox")} with ${escapeHtml(result.node ?? "Node")}.</li>`;
   status("Daytona ready");
   await loadIntegrations();
+  setBusy(false);
+}
+
+async function probeBrowser() {
+  status("Probing browser");
+  setBusy(true);
+  eventsEl.innerHTML = "<li>Starting Daytona computer-use browser probe.</li>";
+  const res = await fetch("/api/daytona/browser-probe", { method: "POST" });
+  const result = await res.json();
+  if (!res.ok || result.ok === false) {
+    eventsEl.innerHTML += `<li>Browser probe failed: ${escapeHtml(result.error ?? result.output ?? "unknown error")}</li>`;
+    status("Probe failed");
+    setBusy(false);
+    return;
+  }
+  eventsEl.innerHTML += `<li>Daytona Chromium available: ${escapeHtml(result.output ?? "ok")}</li>`;
+  status("Browser ready");
   setBusy(false);
 }
 

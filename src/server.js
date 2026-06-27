@@ -2,8 +2,10 @@ import "dotenv/config";
 import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDemoTarget, normalizeDemoTarget, resolveAdapter } from "./adapters.js";
 import { repairPassword } from "./agent.js";
 import { daytonaStatus, probeDaytona } from "./daytona.js";
+import { probeDaytonaBrowser } from "./daytona-browser.js";
 import { onePasswordStatus } from "./onepassword.js";
 import { scanItems } from "./scanner.js";
 import { getItem, listItems, resetVault } from "./vault.js";
@@ -59,14 +61,23 @@ app.post("/api/daytona/probe", async (_req, res, next) => {
   }
 });
 
+app.post("/api/daytona/browser-probe", async (_req, res) => {
+  try {
+    res.json(await probeDaytonaBrowser());
+  } catch (error) {
+    res.status(503).json({ ok: false, error: error.message });
+  }
+});
+
 app.post("/api/repair/:id", async (req, res, next) => {
   try {
-    const item = normalizeDemoTarget(await getItem(req.params.id));
-    if (!isDemoTarget(item.website)) {
-      res.status(422).json({ ok: false, error: "No demo adapter for this website yet." });
+    const item = normalizeDemoTarget(await getItem(req.params.id), port);
+    const adapter = resolveAdapter(item);
+    if (!adapter.repairable) {
+      res.status(422).json({ ok: false, error: adapter.note, adapter });
       return;
     }
-    res.json(await repairPassword(item));
+    res.json(await repairPassword(item, adapter));
   } catch (error) {
     next(error);
   }
@@ -164,31 +175,6 @@ app.use((error, _req, res, _next) => {
   console.error(error);
   res.status(500).json({ ok: false, error: error.message });
 });
-
-function isDemoTarget(value) {
-  try {
-    const url = new URL(value);
-    return ["localhost", "127.0.0.1"].includes(url.hostname) && url.pathname.startsWith("/target");
-  } catch {
-    return false;
-  }
-}
-
-function normalizeDemoTarget(item) {
-  if (!isDemoTarget(item.website)) return item;
-  const rewrite = (value) => {
-    const url = new URL(value);
-    url.protocol = "http:";
-    url.hostname = "localhost";
-    url.port = String(port);
-    return url.toString();
-  };
-  return {
-    ...item,
-    website: rewrite(item.website),
-    changePasswordUrl: item.changePasswordUrl ? rewrite(item.changePasswordUrl) : `http://localhost:${port}/target/settings`,
-  };
-}
 
 try {
   const demoItem = await getItem("agi-house-demo");
