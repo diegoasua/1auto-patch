@@ -1,0 +1,32 @@
+[
+  {
+    "id": "agi-house-demo",
+    "title": "AGI House Demo",
+    "website": "http://localhost:3000/target/login",
+    "changePasswordUrl": "http://localhost:3000/target/settings",
+    "username": "diego@example.com",
+    "password": "summer2024",
+    "updatedAt": "2024-01-15T18:00:00.000Z",
+    "tags": ["demo", "weak"]
+  },
+  {
+    "id": "daytona-dashboard",
+    "title": "Daytona Dashboard",
+    "website": "https://app.daytona.io",
+    "changePasswordUrl": "https://app.daytona.io/account/security",
+    "username": "diego@example.com",
+    "password": "nVg8!wC2@pL9#qS4",
+    "updatedAt": "2026-05-22T16:00:00.000Z",
+    "tags": ["sponsor"]
+  },
+  {
+    "id": "old-forum",
+    "title": "Old Forum",
+    "website": "https://forum.example.com",
+    "changePasswordUrl": "https://forum.example.com/settings/password",
+    "username": "diego",
+    "password": "password123",
+    "updatedAt": "2022-11-04T12:00:00.000Z",
+    "tags": ["compromised"]
+  }
+]

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Credential Autopatch</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <aside class="sidebar">
+        <div>
+          <p class="eyebrow">1Password x Daytona</p>
+          <h1>Credential Autopatch</h1>
+        </div>
+        <div class="actions">
+          <button id="scanButton">Scan vault</button>
+          <button id="resetButton" class="secondary">Reset demo</button>
+          <button id="probeDaytonaButton" class="secondary">Probe Daytona</button>
+        </div>
+        <div class="metric">
+          <span id="riskyCount">-</span>
+          <small>risky credentials</small>
+        </div>
+        <div id="integrations" class="integrations"></div>
+      </aside>
+
+      <section class="workspace">
+        <div class="toolbar">
+          <div>
+            <h2>Repair Queue</h2>
+            <p>Approve one credential at a time. The agent only receives that selected secret.</p>
+          </div>
+          <span id="status">Ready</span>
+        </div>
+        <div id="results" class="results"></div>
+        <section class="log">
+          <h2>Agent Log</h2>
+          <ol id="events"></ol>
+        </section>
+      </section>
+    </main>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
