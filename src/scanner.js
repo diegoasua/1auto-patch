@@ -1,6 +1,8 @@
 import { resolveAdapter } from "./adapters.js";
 import { ageDays, breachCount, scorePassword } from "./password.js";
 
+const WEAK_SCORE_THRESHOLD = 70;
+
 export async function scanItems(items) {
   const passwordUse = new Map();
   for (const item of items) {
@@ -14,7 +16,7 @@ export async function scanItems(items) {
     const age = ageDays(item.updatedAt);
     const adapter = resolveAdapter(item);
     const reasons = [];
-    if (score < 55) reasons.push("weak");
+    if (score < WEAK_SCORE_THRESHOLD) reasons.push("weak");
     if (breaches > 0) reasons.push("known breach");
     if (passwordUse.get(item.password) > 1) reasons.push("reused");
     if (age > 365) reasons.push("old");
